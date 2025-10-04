@@ -33,18 +33,9 @@ class TreeSitterParser:
         self.parser.set_language(self.language)
 
         self.language_specific_parser = None
-        if self.language_name == 'python':
-            from .languages.python import PythonTreeSitterParser
-            self.language_specific_parser = PythonTreeSitterParser(self)
-        elif self.language_name == 'javascript':
-            from .languages.javascript import JavascriptTreeSitterParser
-            self.language_specific_parser = JavascriptTreeSitterParser(self)
-        elif self.language_name == 'cpp':
-            from .languages.cpp import CppTreeSitterParser
-            self.language_specific_parser = CppTreeSitterParser(self)
-        elif self.language_name == 'rust':
-            from .languages.rust import RustTreeSitterParser
-            self.language_specific_parser = RustTreeSitterParser(self)
+        if self.language_name == 'css':
+            from .languages.css import CSSTreeSitterParser
+            self.language_specific_parser = CSSTreeSitterParser(self)
 
     def parse(self, file_path: Path, is_dependency: bool = False) -> Dict:
         """Dispatches parsing to the language-specific parser."""
@@ -62,44 +53,39 @@ class GraphBuilder:
         self.loop = loop
         self.driver = self.db_manager.get_driver()
         self.parsers = {
-            '.py': TreeSitterParser('python'),
-            '.js': TreeSitterParser('javascript'), # Added JavaScript parser
-            '.jsx': TreeSitterParser('javascript'),
-            '.mjs': TreeSitterParser('javascript'),
-            '.cjs': TreeSitterParser('javascript'),
-            '.cpp': TreeSitterParser('cpp'),
-            '.h': TreeSitterParser('cpp'),
-            '.hpp': TreeSitterParser('cpp'),
-            '.rs': TreeSitterParser('rust'),
+            '.css': TreeSitterParser('css'),
         }
         self.create_schema()
 
-    # A general schema creation based on common features across languages
+    # CSS-specific schema creation
     def create_schema(self):
-        """Create constraints and indexes in Neo4j."""
+        """Create constraints and indexes in Neo4j for CSS constructs."""
         with self.driver.session() as session:
             try:
                 session.run("CREATE CONSTRAINT repository_path IF NOT EXISTS FOR (r:Repository) REQUIRE r.path IS UNIQUE")
                 session.run("CREATE CONSTRAINT file_path IF NOT EXISTS FOR (f:File) REQUIRE f.path IS UNIQUE")
                 session.run("CREATE CONSTRAINT directory_path IF NOT EXISTS FOR (d:Directory) REQUIRE d.path IS UNIQUE")
-                session.run("CREATE CONSTRAINT function_unique IF NOT EXISTS FOR (f:Function) REQUIRE (f.name, f.file_path, f.line_number) IS UNIQUE")
-                session.run("CREATE CONSTRAINT class_unique IF NOT EXISTS FOR (c:Class) REQUIRE (c.name, c.file_path, c.line_number) IS UNIQUE")
-                session.run("CREATE CONSTRAINT variable_unique IF NOT EXISTS FOR (v:Variable) REQUIRE (v.name, v.file_path, v.line_number) IS UNIQUE")
-                session.run("CREATE CONSTRAINT module_name IF NOT EXISTS FOR (m:Module) REQUIRE m.name IS UNIQUE")
+                # CSS-specific constraints - treating CSS rules as "functions" and selectors as "classes"
+                session.run("CREATE CONSTRAINT css_rule_unique IF NOT EXISTS FOR (f:Function) REQUIRE (f.name, f.file_path, f.line_number) IS UNIQUE")
+                session.run("CREATE CONSTRAINT css_selector_unique IF NOT EXISTS FOR (c:Class) REQUIRE (c.name, c.file_path, c.line_number) IS UNIQUE")
+                session.run("CREATE CONSTRAINT css_variable_unique IF NOT EXISTS FOR (v:Variable) REQUIRE (v.name, v.file_path, v.line_number) IS UNIQUE")
+                session.run("CREATE CONSTRAINT css_import_unique IF NOT EXISTS FOR (m:Module) REQUIRE m.name IS UNIQUE")
 
-                # Indexes for language attribute
-                session.run("CREATE INDEX function_lang IF NOT EXISTS FOR (f:Function) ON (f.lang)")
-                session.run("CREATE INDEX class_lang IF NOT EXISTS FOR (c:Class) ON (c.lang)")
+                # Indexes for CSS language
+                session.run("CREATE INDEX css_rule_lang IF NOT EXISTS FOR (f:Function) ON (f.lang)")
+                session.run("CREATE INDEX css_selector_lang IF NOT EXISTS FOR (c:Class) ON (c.lang)")
+                session.run("CREATE INDEX css_variable_lang IF NOT EXISTS FOR (v:Variable) ON (v.lang)")
                 
+                # Full-text search for CSS constructs
                 session.run("""
-                    CREATE FULLTEXT INDEX code_search_index IF NOT EXISTS 
+                    CREATE FULLTEXT INDEX css_search_index IF NOT EXISTS 
                     FOR (n:Function|Class|Variable) 
                     ON EACH [n.name, n.source, n.docstring]
                 """ )
                 
-                logger.info("Database schema verified/created successfully")
+                logger.info("CSS database schema verified/created successfully")
             except Exception as e:
-                logger.warning(f"Schema creation warning: {e}")
+                logger.warning(f"CSS schema creation warning: {e}")
 
 
     def _pre_scan_for_imports(self, files: list[Path]) -> dict:
@@ -115,12 +101,9 @@ class GraphBuilder:
                     files_by_lang[lang_ext] = []
                 files_by_lang[lang_ext].append(file)
 
-        if '.py' in files_by_lang:
-            from .languages import python as python_lang_module
-            imports_map.update(python_lang_module.pre_scan_python(files_by_lang['.py'], self.parsers['.py']))
-        elif '.js' in files_by_lang:
-            from .languages import javascript as js_lang_module
-            imports_map.update(js_lang_module.pre_scan_javascript(files_by_lang['.js'], self.parsers['.js']))
+        if '.css' in files_by_lang:
+            from .languages import css as css_lang_module
+            imports_map.update(css_lang_module.pre_scan_css(files_by_lang['.css'], self.parsers['.css']))
             
         return imports_map
 
@@ -223,17 +206,15 @@ class GraphBuilder:
 
             # Handle imports and create IMPORTS relationships
             for imp in file_data.get('imports', []):
-                logger.info(f"Processing import: {imp}")
+                logger.info(f"Processing CSS import: {imp}")
                 lang = file_data.get('lang')
-                if lang == 'javascript':
-                    # New, correct logic for JS
-                    module_name = imp.get('source')
+                if lang == 'css':
+                    # CSS-specific import logic
+                    module_name = imp.get('name')
                     if not module_name: continue
 
-                    # Use a map for relationship properties to handle optional alias
-                    rel_props = {'imported_name': imp.get('name', '*')}
-                    if imp.get('alias'):
-                        rel_props['alias'] = imp.get('alias')
+                    # CSS imports don't have aliases, but we can track the import type
+                    rel_props = {'import_type': 'css_import'}
 
                     session.run("""
                         MATCH (f:File {path: $file_path})
@@ -242,7 +223,7 @@ class GraphBuilder:
                         SET r += $props
                     """, file_path=file_path_str, module_name=module_name, props=rel_props)
                 else:
-                    # Existing logic for Python (and other languages)
+                    # Fallback for other languages (though we're only supporting CSS now)
                     set_clauses = ["m.alias = $alias"]
                     if 'full_import_name' in imp:
                         set_clauses.append("m.full_import_name = $full_import_name")
@@ -271,75 +252,64 @@ class GraphBuilder:
             # Class inheritance is handled in a separate pass after all files are processed.
             # Function calls are also handled in a separate pass after all files are processed.
 
-    # Second pass to create relationships that depend on all files being present like call functions and class inheritance
+    # Second pass to create relationships that depend on all files being present like CSS function calls
     def _create_function_calls(self, session, file_data: Dict, imports_map: dict):
-        """Create CALLS relationships with a unified, prioritized logic flow for all call types."""
+        """Create CALLS relationships for CSS function calls like calc(), var(), etc."""
         caller_file_path = str(Path(file_data['file_path']).resolve())
         local_function_names = {func['name'] for func in file_data.get('functions', [])}
-        local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name'] 
-                        for imp in file_data.get('imports', [])}
         
         for call in file_data.get('function_calls', []):
             called_name = call['name']
-            if called_name in __builtins__: continue
-
-            resolved_path = None
+            # CSS functions like calc, var, url, rgb, etc.
+            css_builtin_functions = {'calc', 'var', 'url', 'rgb', 'rgba', 'hsl', 'hsla', 'linear-gradient', 'radial-gradient'}
             
-            if call.get('inferred_obj_type'):
-                obj_type = call['inferred_obj_type']
-                possible_paths = imports_map.get(obj_type, [])
-                if len(possible_paths) > 0:
-                    resolved_path = possible_paths[0]
-            
-            else:
-                lookup_name = call['full_name'].split('.')[0] if '.' in call['full_name'] else called_name
-                possible_paths = imports_map.get(lookup_name, [])
-
-                if lookup_name in local_function_names:
-                    resolved_path = caller_file_path
-                elif len(possible_paths) == 1:
-                    resolved_path = possible_paths[0]
-                elif len(possible_paths) > 1 and lookup_name in local_imports:
-                    full_import_name = local_imports[lookup_name]
-                    for path in possible_paths:
-                        if full_import_name.replace('.', '/') in path:
-                            resolved_path = path
-                            break
-            
-            if not resolved_path:
-                if called_name in imports_map and imports_map[called_name]:
-                    resolved_path = imports_map[called_name][0]
-                else:
-                    resolved_path = caller_file_path
-
-            caller_context = call.get('context')
-            if caller_context and len(caller_context) == 3 and caller_context[0] is not None:
-                caller_name, _, caller_line_number = caller_context
-                session.run("""
-                    MATCH (caller:Function {name: $caller_name, file_path: $caller_file_path, line_number: $caller_line_number})
-                    MATCH (called:Function {name: $called_name, file_path: $called_file_path})
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                """,
-                caller_name=caller_name,
-                caller_file_path=caller_file_path,
-                caller_line_number=caller_line_number,
-                called_name=called_name,
-                called_file_path=resolved_path,
-                line_number=call['line_number'],
-                args=call.get('args', []),
-                full_call_name=call.get('full_name', called_name))
-            else:
+            if called_name in css_builtin_functions:
+                # Built-in CSS functions - create a relationship to a virtual built-in function
                 session.run("""
                     MATCH (caller:File {path: $caller_file_path})
-                    MATCH (called:Function {name: $called_name, file_path: $called_file_path})
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
+                    MERGE (called:Function {name: $called_name, file_path: 'built-in', line_number: 0})
+                    SET called.source = 'CSS built-in function'
+                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name, call_type: 'css_function'}]->(called)
                 """,
                 caller_file_path=caller_file_path,
                 called_name=called_name,
-                called_file_path=resolved_path,
                 line_number=call['line_number'],
                 args=call.get('args', []),
                 full_call_name=call.get('full_name', called_name))
+            else:
+                # Look for custom CSS functions or variables
+                resolved_path = caller_file_path
+                if called_name in imports_map and imports_map[called_name]:
+                    resolved_path = imports_map[called_name][0]
+
+                caller_context = call.get('context')
+                if caller_context and len(caller_context) == 3 and caller_context[0] is not None:
+                    caller_name, _, caller_line_number = caller_context
+                    session.run("""
+                        MATCH (caller:Function {name: $caller_name, file_path: $caller_file_path, line_number: $caller_line_number})
+                        MATCH (called:Function {name: $called_name, file_path: $called_file_path})
+                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name, call_type: 'css_function'}]->(called)
+                    """,
+                    caller_name=caller_name,
+                    caller_file_path=caller_file_path,
+                    caller_line_number=caller_line_number,
+                    called_name=called_name,
+                    called_file_path=resolved_path,
+                    line_number=call['line_number'],
+                    args=call.get('args', []),
+                    full_call_name=call.get('full_name', called_name))
+                else:
+                    session.run("""
+                        MATCH (caller:File {path: $caller_file_path})
+                        MATCH (called:Function {name: $called_name, file_path: $called_file_path})
+                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name, call_type: 'css_function'}]->(called)
+                    """,
+                    caller_file_path=caller_file_path,
+                    called_name=called_name,
+                    called_file_path=resolved_path,
+                    line_number=call['line_number'],
+                    args=call.get('args', []),
+                    full_call_name=call.get('full_name', called_name))
 
     def _create_all_function_calls(self, all_file_data: list[Dict], imports_map: dict):
         """Create CALLS relationships for all functions after all files have been processed."""
@@ -348,71 +318,48 @@ class GraphBuilder:
                 self._create_function_calls(session, file_data, imports_map)
 
     def _create_inheritance_links(self, session, file_data: Dict, imports_map: dict):
-        """Create INHERITS relationships with a more robust resolution logic."""
+        """Create CSS cascade and inheritance relationships."""
         caller_file_path = str(Path(file_data['file_path']).resolve())
-        local_class_names = {c['name'] for c in file_data.get('classes', [])}
-        # Create a map of local import aliases/names to full import names
-        local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name']
-                         for imp in file_data.get('imports', [])}
-
+        
+        # For CSS, we'll create relationships between selectors that have similar patterns
+        # or between media queries and their contained rules
+        local_selector_names = {c['name'] for c in file_data.get('classes', [])}
+        
         for class_item in file_data.get('classes', []):
-            if not class_item.get('bases'):
-                continue
-
-            for base_class_str in class_item['bases']:
-                if base_class_str == 'object':
-                    continue
-
-                resolved_path = None
-                target_class_name = base_class_str.split('.')[-1]
-
-                # Handle qualified names like module.Class or alias.Class
-                if '.' in base_class_str:
-                    lookup_name = base_class_str.split('.')[0]
+            selector_name = class_item['name']
+            
+            # Create relationships for CSS cascade - find selectors that might override this one
+            # This is a simplified approach - in reality, CSS specificity is much more complex
+            for other_class in file_data.get('classes', []):
+                if other_class['name'] != selector_name:
+                    other_selector = other_class['name']
                     
-                    # Case 1: The prefix is a known import
-                    if lookup_name in local_imports:
-                        full_import_name = local_imports[lookup_name]
-                        possible_paths = imports_map.get(target_class_name, [])
-                        # Find the path that corresponds to the imported module
-                        for path in possible_paths:
-                            if full_import_name.replace('.', '/') in path:
-                                resolved_path = path
-                                break
-                # Handle simple names
-                else:
-                    lookup_name = base_class_str
-                    # Case 2: The base class is in the same file
-                    if lookup_name in local_class_names:
-                        resolved_path = caller_file_path
-                    # Case 3: The base class was imported directly (e.g., from module import Parent)
-                    elif lookup_name in local_imports:
-                        full_import_name = local_imports[lookup_name]
-                        possible_paths = imports_map.get(target_class_name, [])
-                        for path in possible_paths:
-                            if full_import_name.replace('.', '/') in path:
-                                resolved_path = path
-                                break
-                    # Case 4: Fallback to global map (less reliable)
-                    elif lookup_name in imports_map:
-                        possible_paths = imports_map[lookup_name]
-                        if len(possible_paths) == 1:
-                            resolved_path = possible_paths[0]
-                
-                # If a path was found, create the relationship
-                if resolved_path:
-                    session.run("""
-                        MATCH (child:Class {name: $child_name, file_path: $file_path})
-                        MATCH (parent:Class {name: $parent_name, file_path: $resolved_parent_file_path})
-                        MERGE (child)-[:INHERITS]->(parent)
-                    """,
-                    child_name=class_item['name'],
-                    file_path=caller_file_path,
-                    parent_name=target_class_name,
-                    resolved_parent_file_path=resolved_path)
+                    # Check if selectors might be related (e.g., one is more specific than the other)
+                    # This is a basic heuristic - real CSS specificity calculation is much more complex
+                    if (selector_name in other_selector or 
+                        other_selector in selector_name or
+                        self._css_selectors_might_cascade(selector_name, other_selector)):
+                        
+                        session.run("""
+                            MATCH (child:Class {name: $child_name, file_path: $file_path})
+                            MATCH (parent:Class {name: $parent_name, file_path: $file_path})
+                            MERGE (child)-[:CSS_CASCADE]->(parent)
+                        """,
+                        child_name=selector_name,
+                        file_path=caller_file_path,
+                        parent_name=other_selector)
+
+    def _css_selectors_might_cascade(self, selector1: str, selector2: str) -> bool:
+        """Simple heuristic to determine if two CSS selectors might have cascade relationships."""
+        # Remove common selectors and check for patterns
+        s1_clean = selector1.replace('.', '').replace('#', '').replace(':', '').replace(' ', '')
+        s2_clean = selector2.replace('.', '').replace('#', '').replace(':', '').replace(' ', '')
+        
+        # Check if one contains the other (simplified cascade detection)
+        return len(s1_clean) > 0 and len(s2_clean) > 0 and (s1_clean in s2_clean or s2_clean in s1_clean)
 
     def _create_all_inheritance_links(self, all_file_data: list[Dict], imports_map: dict):
-        """Create INHERITS relationships for all classes after all files have been processed."""
+        """Create CSS cascade relationships for all selectors after all files have been processed."""
         with self.driver.session() as session:
             for file_data in all_file_data:
                 self._create_inheritance_links(session, file_data, imports_map)
